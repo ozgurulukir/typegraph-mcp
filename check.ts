@@ -209,6 +209,44 @@ function hasDeclaredDependency(packageJson: Record<string, unknown> | null, pack
   });
 }
 
+const ESLINT_CONFIG_NAMES = [
+  "eslint.config.mjs",
+  "eslint.config.js",
+  "eslint.config.ts",
+  "eslint.config.cjs",
+];
+const OXLINT_CONFIG_NAMES = [
+  ".oxlintrc.json",
+  "oxlint.config.ts",
+  "oxlint.config.js",
+  "oxlint.config.mjs",
+  "oxlint.config.cjs",
+];
+
+type LintConfigCheck =
+  | { tool: "ESLint"; fileName: string; fullPath: string; propertyName: "ignores" }
+  | { tool: "Oxlint"; fileName: string; fullPath: string; propertyName: "ignorePatterns" };
+
+function findLintConfigs(projectRoot: string): LintConfigCheck[] {
+  const configs: LintConfigCheck[] = [];
+
+  for (const fileName of ESLINT_CONFIG_NAMES) {
+    const fullPath = path.resolve(projectRoot, fileName);
+    if (fs.existsSync(fullPath)) {
+      configs.push({ tool: "ESLint", fileName, fullPath, propertyName: "ignores" });
+    }
+  }
+
+  for (const fileName of OXLINT_CONFIG_NAMES) {
+    const fullPath = path.resolve(projectRoot, fileName);
+    if (fs.existsSync(fullPath)) {
+      configs.push({ tool: "Oxlint", fileName, fullPath, propertyName: "ignorePatterns" });
+    }
+  }
+
+  return configs;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 export async function main(configOverride?: TypegraphConfig): Promise<CheckResult> {
@@ -527,31 +565,32 @@ export async function main(configOverride?: TypegraphConfig): Promise<CheckResul
     );
   }
 
-  // 11. ESLint ignores (only when typegraph-mcp is embedded inside the project)
+  // 11. Lint ignores (only when typegraph-mcp is embedded inside the project)
   if (toolIsEmbedded) {
-    const eslintConfigNames = ["eslint.config.mjs", "eslint.config.js", "eslint.config.ts", "eslint.config.cjs"];
-    const eslintConfigFile = eslintConfigNames.find((name) => fs.existsSync(path.resolve(projectRoot, name)));
-    if (eslintConfigFile) {
-      const eslintConfigPath = path.resolve(projectRoot, eslintConfigFile);
-      const eslintContent = fs.readFileSync(eslintConfigPath, "utf-8");
+    const lintConfigs = findLintConfigs(projectRoot);
+    if (lintConfigs.length > 0) {
       // Determine the parent directory (e.g. "plugins") for the ignore pattern
       const parentDir = path.basename(path.dirname(toolDir));
       const parentIgnorePattern = new RegExp(`["']${parentDir}\\/\\*\\*["']`);
-      const hasParentIgnore = parentIgnorePattern.test(eslintContent);
 
-      if (hasParentIgnore) {
-        pass(`ESLint ignores ${parentDir}/`);
-      } else {
-        fail(
-          `ESLint missing ignore: "${parentDir}/**"`,
-          `Add to the ignores array in ${eslintConfigFile}:\n    "${parentDir}/**",`
-        );
+      for (const config of lintConfigs) {
+        const content = fs.readFileSync(config.fullPath, "utf-8");
+        const hasParentIgnore = parentIgnorePattern.test(content);
+
+        if (hasParentIgnore) {
+          pass(`${config.tool} ignores ${parentDir}/ (${config.fileName})`);
+        } else {
+          fail(
+            `${config.tool} missing ignore: "${parentDir}/**" (${config.fileName})`,
+            `Add to ${config.propertyName} in ${config.fileName}:\n    "${parentDir}/**",`
+          );
+        }
       }
     } else {
-      skip("ESLint config check (no eslint flat config found)");
+      skip("Lint config check (no ESLint or Oxlint config found)");
     }
   } else {
-    skip("ESLint config check (typegraph-mcp is external to project)");
+    skip("Lint config check (typegraph-mcp is external to project)");
   }
 
   // 12. .gitignore check (optional)

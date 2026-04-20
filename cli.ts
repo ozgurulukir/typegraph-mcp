@@ -601,16 +601,7 @@ function ensureTsconfigExclude(projectRoot: string): void {
 
   try {
     const raw = fs.readFileSync(tsconfigPath, "utf-8");
-    // Strip single-line comments (// ...) and trailing commas for JSON.parse
-    const stripped = raw
-      .replace(/\/\/.*$/gm, "")
-      .replace(/,(\s*[}\]])/g, "$1");
-    const tsconfig = JSON.parse(stripped);
-
-    const exclude: string[] = tsconfig.exclude || [];
-    if (exclude.some((e: string) => e === "plugins" || e === "plugins/**" || e === "plugins/*")) {
-      return; // Already excluded
-    }
+    if (/["']plugins(?:\/\*\*|\/\*|)["']/.test(raw)) return;
 
     // Insert "plugins/**" into the exclude array in the original file
     if (raw.includes('"exclude"')) {
@@ -642,48 +633,137 @@ function ensureTsconfigExclude(projectRoot: string): void {
   }
 }
 
-// ─── ESLint Ignore ───────────────────────────────────────────────────────────
+// ─── Lint Ignore ─────────────────────────────────────────────────────────────
 
-function ensureEslintIgnore(projectRoot: string): void {
-  const eslintConfigNames = ["eslint.config.mjs", "eslint.config.js", "eslint.config.ts", "eslint.config.cjs"];
-  const eslintConfigFile = eslintConfigNames.find((name) => fs.existsSync(path.resolve(projectRoot, name)));
-  if (!eslintConfigFile) return;
-  const eslintConfigPath = path.resolve(projectRoot, eslintConfigFile);
+const ESLINT_CONFIG_NAMES = [
+  "eslint.config.mjs",
+  "eslint.config.js",
+  "eslint.config.ts",
+  "eslint.config.cjs",
+];
+const OXLINT_CONFIG_NAMES = [
+  ".oxlintrc.json",
+  "oxlint.config.ts",
+  "oxlint.config.js",
+  "oxlint.config.mjs",
+  "oxlint.config.cjs",
+];
 
-  try {
-    const raw = fs.readFileSync(eslintConfigPath, "utf-8");
-    const pattern = /["']plugins\/\*\*["']/;
-    if (pattern.test(raw)) return; // Already ignored
+type LintConfig =
+  | { tool: "ESLint"; fileName: string; fullPath: string; format: "flat" }
+  | { tool: "Oxlint"; fileName: string; fullPath: string; format: "json" | "module" };
 
-    // Strategy 1: Append to an existing ignores array
-    const ignoresArrayRe = /(ignores\s*:\s*\[)([\s\S]*?)(\])/;
-    const match = raw.match(ignoresArrayRe);
-    if (match) {
-      const updated = raw.replace(ignoresArrayRe, (_m, open, items, close) => {
-        const trimmed = items.trimEnd();
-        const needsComma = trimmed.length > 0 && !trimmed.endsWith(",");
-        return `${open}${items.trimEnd()}${needsComma ? "," : ""} "plugins/**"${close}`;
-      });
-      fs.writeFileSync(eslintConfigPath, updated);
-      p.log.success(`Added "plugins/**" to ${eslintConfigFile} ignores`);
-      return;
+function findLintConfigs(projectRoot: string): LintConfig[] {
+  const configs: LintConfig[] = [];
+
+  for (const fileName of ESLINT_CONFIG_NAMES) {
+    const fullPath = path.resolve(projectRoot, fileName);
+    if (fs.existsSync(fullPath)) {
+      configs.push({ tool: "ESLint", fileName, fullPath, format: "flat" });
     }
+  }
 
-    // Strategy 2: Insert a new ignores object at the start of the exported array
-    // Matches: export default [ or export default tseslint.config(
-    const exportArrayRe = /(export\s+default\s+(?:\w+\.config\(|\[))\s*\n?/;
-    if (exportArrayRe.test(raw)) {
-      const updated = raw.replace(exportArrayRe, (m) => {
-        return `${m}  { ignores: ["plugins/**"] },\n`;
+  for (const fileName of OXLINT_CONFIG_NAMES) {
+    const fullPath = path.resolve(projectRoot, fileName);
+    if (fs.existsSync(fullPath)) {
+      configs.push({
+        tool: "Oxlint",
+        fileName,
+        fullPath,
+        format: fileName.endsWith(".json") ? "json" : "module",
       });
-      fs.writeFileSync(eslintConfigPath, updated);
-      p.log.success(`Added "plugins/**" to ${eslintConfigFile} ignores`);
-      return;
     }
+  }
 
-    p.log.warn(`Could not patch ${eslintConfigFile} — manually add "plugins/**" to the ignores array`);
-  } catch {
-    p.log.warn(`Could not update ${eslintConfigFile} — manually add "plugins/**" to the ignores array`);
+  return configs;
+}
+
+function appendToArrayLiteral(raw: string, propertyPattern: RegExp, valueLiteral: string): string | null {
+  if (!propertyPattern.test(raw)) return null;
+  return raw.replace(propertyPattern, (_match, open, items, close) => {
+    const trimmed = items.trimEnd();
+    const needsComma = trimmed.length > 0 && !trimmed.endsWith(",");
+    return `${open}${items.trimEnd()}${needsComma ? "," : ""} ${valueLiteral}${close}`;
+  });
+}
+
+function insertTopLevelJsonArrayProperty(raw: string, propertyName: string, valueLiteral: string): string | null {
+  const lastBrace = raw.lastIndexOf("}");
+  if (lastBrace === -1) return null;
+  const before = raw.slice(0, lastBrace).trimEnd();
+  const needsComma = !before.endsWith(",") && !before.endsWith("{");
+  return `${before}${needsComma ? "," : ""}\n  "${propertyName}": [${valueLiteral}]\n}\n`;
+}
+
+function patchEslintConfig(raw: string): string | null {
+  const updatedIgnores = appendToArrayLiteral(raw, /(ignores\s*:\s*\[)([\s\S]*?)(\])/, '"plugins/**"');
+  if (updatedIgnores) return updatedIgnores;
+
+  // Matches: export default [ or export default tseslint.config(
+  const exportArrayRe = /(export\s+default\s+(?:\w+\.config\(|\[))\s*\n?/;
+  if (exportArrayRe.test(raw)) {
+    return raw.replace(exportArrayRe, (match) => `${match}  { ignores: ["plugins/**"] },\n`);
+  }
+
+  return null;
+}
+
+function patchOxlintJsonConfig(raw: string): string | null {
+  const updatedIgnores = appendToArrayLiteral(
+    raw,
+    /("ignorePatterns"\s*:\s*\[)([\s\S]*?)(\])/,
+    '"plugins/**"'
+  );
+  if (updatedIgnores) return updatedIgnores;
+  return insertTopLevelJsonArrayProperty(raw, "ignorePatterns", '"plugins/**"');
+}
+
+function patchOxlintModuleConfig(raw: string): string | null {
+  const updatedIgnores = appendToArrayLiteral(
+    raw,
+    /(ignorePatterns\s*:\s*\[)([\s\S]*?)(\])/,
+    '"plugins/**"'
+  );
+  if (updatedIgnores) return updatedIgnores;
+
+  const exportObjectRe = /(export\s+default\s*\{)\s*\n?/;
+  if (exportObjectRe.test(raw)) {
+    return raw.replace(exportObjectRe, (match) => `${match}\n  ignorePatterns: ["plugins/**"],`);
+  }
+
+  return null;
+}
+
+function ensureLintIgnores(projectRoot: string): void {
+  const configs = findLintConfigs(projectRoot);
+  for (const config of configs) {
+    try {
+      const raw = fs.readFileSync(config.fullPath, "utf-8");
+      if (/["']plugins\/\*\*["']/.test(raw)) continue;
+
+      const updated =
+        config.tool === "ESLint"
+          ? patchEslintConfig(raw)
+          : config.format === "json"
+            ? patchOxlintJsonConfig(raw)
+            : patchOxlintModuleConfig(raw);
+
+      if (updated) {
+        fs.writeFileSync(config.fullPath, updated);
+        const propertyName = config.tool === "ESLint" ? "ignores" : "ignorePatterns";
+        p.log.success(`Added "plugins/**" to ${config.fileName} ${propertyName}`);
+      } else {
+        const propertyName = config.tool === "ESLint" ? "ignores" : "ignorePatterns";
+        p.log.warn(
+          `Could not patch ${config.fileName} — manually add "plugins/**" to ${propertyName}`
+        );
+      }
+    } catch {
+      const propertyName = config.tool === "ESLint" ? "ignores" : "ignorePatterns";
+      p.log.warn(
+        `Could not update ${config.fileName} — manually add "plugins/**" to ${propertyName}`
+      );
+    }
   }
 }
 
@@ -920,8 +1000,8 @@ async function setup(yes: boolean): Promise<void> {
   // 8. Ensure plugins/ is excluded from tsconfig
   ensureTsconfigExclude(projectRoot);
 
-  // 9. Ensure plugins/ is ignored by ESLint
-  ensureEslintIgnore(projectRoot);
+  // 9. Ensure plugins/ is ignored by supported lint configs
+  ensureLintIgnores(projectRoot);
 
   // 10. Verification
   await runVerification(targetDir, selectedAgents);
