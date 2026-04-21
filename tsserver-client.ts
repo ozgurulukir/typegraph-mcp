@@ -323,6 +323,23 @@ export class TsServerClient {
     await new Promise((r) => setTimeout(r, 50));
   }
 
+  async reloadOpenFile(file: string): Promise<boolean> {
+    const absPath = this.resolvePath(file);
+    if (!this.openFiles.has(absPath)) return false;
+    await this.sendRequest("reload", {
+      file: absPath,
+      tmpfile: absPath,
+    });
+    return true;
+  }
+
+  closeFile(file: string): boolean {
+    const absPath = this.resolvePath(file);
+    if (!this.openFiles.delete(absPath)) return false;
+    this.sendNotification("close", { file: absPath });
+    return true;
+  }
+
   // ─── Public API ────────────────────────────────────────────────────────
 
   async definition(file: string, line: number, offset: number): Promise<DefinitionResult[]> {

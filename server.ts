@@ -1132,7 +1132,15 @@ async function main() {
 
   moduleGraph = graphResult.graph;
   moduleResolver = graphResult.resolver;
-  startWatcher(projectRoot, moduleGraph, graphResult.resolver);
+  startWatcher(projectRoot, moduleGraph, graphResult.resolver, {
+    onFileUpdated: (filePath) =>
+      client.reloadOpenFile(filePath).catch((err) => {
+        log(`Failed to reload open file ${relPath(filePath)}:`, err);
+      }),
+    onFileDeleted: (filePath) => {
+      client.closeFile(filePath);
+    },
+  });
 
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);

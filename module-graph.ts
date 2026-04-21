@@ -460,7 +460,11 @@ export function removeFile(graph: ModuleGraph, filePath: string): void {
 export function startWatcher(
   projectRoot: string,
   graph: ModuleGraph,
-  resolver: ResolverFactory
+  resolver: ResolverFactory,
+  hooks?: {
+    onFileUpdated?: (filePath: string) => void | Promise<void>;
+    onFileDeleted?: (filePath: string) => void | Promise<void>;
+  }
 ): void {
   try {
     const watcher = fs.watch(
@@ -489,9 +493,11 @@ export function startWatcher(
         if (fs.existsSync(absPath)) {
           // File created or modified
           updateFile(graph, absPath, resolver, projectRoot);
+          void hooks?.onFileUpdated?.(absPath);
         } else {
           // File deleted
           removeFile(graph, absPath);
+          void hooks?.onFileDeleted?.(absPath);
         }
       }
     );
